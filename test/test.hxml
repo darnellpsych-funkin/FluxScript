@@ -1,0 +1,3 @@
+# Pruebas del núcleo de FluxScript (sin Flixel): haxe test.hxml
+common.hxml
+--interp
