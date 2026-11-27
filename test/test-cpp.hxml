@@ -1,0 +1,3 @@
+# Las mismas pruebas en C++: haxe test-cpp.hxml && ./bin/TestCore
+common.hxml
+-cpp bin

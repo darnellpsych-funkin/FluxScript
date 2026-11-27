@@ -1,0 +1,12 @@
+{
+	"name": "fluxscript",
+	"url": "https://github.com/darnellpsych-funkin/FluxScript",
+	"description": "Addon de HScript para FNF: el HScript de Psych Engine 1.0 con clases sin import, campos del juego directo, textos con variables, on(), shared y la API de Lua de Psych.",
+	"tags": ["fnf", "hscript", "scripting", "psych", "flixel"],
+	"version": "1.0.0",
+	"releasenote": "Primera versión.",
+	"classPath": "src",
+	"dependencies": {
+		"hscript-iris": ""
+	}
+}
