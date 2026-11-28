@@ -14,6 +14,9 @@ import crowplexus.hscript.Tools;
  *    (FluxClasses). Un `import` de algo que no existe avisa (warningHandler) y no
  *    corta el script.
  *  - `for (x in null)` no hace nada en vez de cortar el script.
+ *  - executeNested: importCode/loadstring desde una función no le borran sus variables.
+ *  - callProtected: un error atrapado desde Haxe (pcall) no rompe las variables locales.
+ *  - `i++` / `i--` sobre variables locales (hscript-iris 1.1 no las cambiaba).
  */
 class FluxInterp extends Interp
 {
@@ -29,6 +32,8 @@ class FluxInterp extends Interp
 	{
 		super();
 		showPosOnLog = false;
+		depth = 0; // hscript lo pone recién en execute (y executeNested lo guarda antes)
+		inTry = false;
 	}
 
 	function set_parent(value:Dynamic):Dynamic
@@ -151,6 +156,17 @@ class FluxInterp extends Interp
 				var value:Dynamic = old + delta;
 				Reflect.setProperty(parent, id, value);
 				return prefix ? value : old;
+			case EIdent(id) if (locals.get(id) != null):
+				// hscript-iris 1.1 no cambia las variables locales con ++ y -- (`var i = 0; i++;` dejaba 0)
+				#if hscriptPos
+				curExpr = e;
+				#end
+				var local = locals.get(id);
+				if (local.const == true)
+					error(ECustom('No se puede cambiar "$id": es final'));
+				var old:Dynamic = local.r;
+				local.r = old + delta;
+				return prefix ? local.r : old;
 			default:
 				return super.increment(e, prefix, delta);
 		}
@@ -161,6 +177,63 @@ class FluxInterp extends Interp
 		if (v == null)
 			return [].iterator();
 		return super.makeIterator(v);
+	}
+
+	/** El iterador de un `for (x in v)` (lo usan los `for` que esperan con task.wait). */
+	public function iteratorOf(v:Dynamic):Iterator<Dynamic>
+		return makeIterator(v);
+
+	/**
+	 * Llama a una función del script desde Haxe. Si la función tira un error, el
+	 * intérprete vuelve a como estaba antes de llamarla (hscript solo lo hace dentro de
+	 * un try/catch del script) y el error sigue: así pcall, o un callback del engine que
+	 * falla en medio de otra función, no le rompen las variables a lo que se estaba ejecutando.
+	 */
+	public function callProtected(fn:Dynamic, args:Array<Dynamic>):Dynamic
+	{
+		var oldLocals = locals;
+		var oldDepth:Int = depth;
+		var oldDeclared:Int = declared.length;
+		var oldTry:Bool = inTry;
+		try
+		{
+			return Reflect.callMethod(null, fn, args != null ? args : []);
+		}
+		catch (err:Dynamic)
+		{
+			locals = oldLocals;
+			depth = oldDepth;
+			if (declared.length > oldDeclared)
+				declared.splice(oldDeclared, declared.length - oldDeclared);
+			inTry = oldTry;
+			throw err;
+		}
+	}
+
+	/**
+	 * Ejecuta código sin borrar las variables locales de lo que se estaba ejecutando
+	 * (importCode, importScript o loadstring desde adentro de una función).
+	 */
+	public function executeNested(e:Expr):Dynamic
+	{
+		var oldLocals = locals;
+		var oldDepth:Int = depth;
+		var oldDeclared = declared;
+		try
+		{
+			var result:Dynamic = execute(e);
+			locals = oldLocals;
+			depth = oldDepth;
+			declared = oldDeclared;
+			return result;
+		}
+		catch (err:Dynamic)
+		{
+			locals = oldLocals;
+			depth = oldDepth;
+			declared = oldDeclared;
+			throw err;
+		}
 	}
 
 	override function fcall(o:Dynamic, f:String, args:Array<Dynamic>):Dynamic

@@ -2,6 +2,7 @@ package fluxscript;
 
 import crowplexus.hscript.Expr;
 import crowplexus.hscript.Printer;
+import fluxscript.FluxTasks.FluxTask;
 
 /**
  * FluxScript: un addon de HScript (hscript-iris) para FNF.
@@ -12,8 +13,11 @@ import crowplexus.hscript.Printer;
  *  - textos con variables: 'Hola $nombre, tienes ${score} puntos';
  *  - `on('beatHit', función)`: varias funciones para el mismo evento;
  *  - `shared`: datos que comparten todos los FluxScript y duran toda la partida;
- *  - `importCode(código)`, `wait`/`every` (con FluxFlixel) y la API de Lua de
- *    Psych (con fluxscript.psych.FluxPsych).
+ *  - lo de Luau: `task.wait(segundos)` dentro de las funciones, `task.spawn/delay/
+ *    defer/cancel`, `require`, `print`, `warn`, `typeof`, `pcall`, `math`, `os`...
+ *    (FluxLib y FluxAsync);
+ *  - `importCode(código)`, `importScript`, `wait`/`every` y el preset de los .hxs
+ *    (con FluxFlixel), y la API de Lua de Psych (con fluxscript.psych.FluxPsych).
  *
  * Uso básico (en un engine):
  *   var script = new FluxScript(codigo, 'mods/x/scripts/hola.flux', FlxG.state);
@@ -21,9 +25,10 @@ import crowplexus.hscript.Printer;
  *   // o FluxFlixel.apply(script);   // otros engines: timers, colores, clases de Flixel
  *   if (script.execute()) script.call('onCreate');
  */
+@:allow(fluxscript.FluxLib)
 class FluxScript
 {
-	public static inline var VERSION:String = '1.0.0';
+	public static inline var VERSION:String = '1.1.0';
 
 	/** Datos que comparten todos los FluxScript y duran toda la partida (`shared.monedas = 5`). */
 	public static var shared(default, null):Dynamic = {};
@@ -53,6 +58,53 @@ class FluxScript
 	public static dynamic function defaultWarningHandler(script:FluxScript, message:String):Void
 		trace('[FluxScript] ${script.name}: $message');
 
+	/** Qué hacer con print(...) de todos los scripts (por defecto, trace). Cada script puede tener el suyo. */
+	public static dynamic function defaultPrintHandler(script:FluxScript, text:String):Void
+		trace('[FluxScript] ${script.name}: $text');
+
+	/**
+	 * Busca un archivo para require, importScript, fileExists y readFile. Devuelve la
+	 * ruta, o null si no existe. Por defecto mira al lado del script y la ruta tal cual;
+	 * los engines lo cambian para buscar en sus mods (FluxPsych lo hace para Psych).
+	 */
+	public static dynamic function findFile(path:String, ?from:FluxScript):String
+		return findLocalFile(path, from);
+
+	/** Lee un archivo de findFile (null si no se puede). */
+	public static dynamic function readFile(path:String):String
+	{
+		#if sys
+		try
+		{
+			return sys.io.File.getContent(path);
+		}
+		catch (e:Dynamic) {}
+		#end
+		return null;
+	}
+
+	/** findFile por defecto: al lado del script, o la ruta tal cual. */
+	public static function findLocalFile(path:String, ?from:FluxScript):String
+	{
+		#if sys
+		if (path == null || path.length == 0)
+			return null;
+		if (from != null && from.name != null)
+		{
+			var dir:String = haxe.io.Path.directory(from.name);
+			if (dir.length > 0)
+			{
+				var near:String = haxe.io.Path.join([dir, path]);
+				if (sys.FileSystem.exists(near) && !sys.FileSystem.isDirectory(near))
+					return near;
+			}
+		}
+		if (sys.FileSystem.exists(path) && !sys.FileSystem.isDirectory(path))
+			return path;
+		#end
+		return null;
+	}
+
 	/** Nombre del script (la ruta del archivo) para los errores. */
 	public var name(default, null):String;
 
@@ -65,6 +117,9 @@ class FluxScript
 	/** Lo que devolvió el cuerpo del script al ejecutarse. */
 	public var returnValue:Dynamic = null;
 
+	/** Si el último código ejecutado tenía un `return valor` fuera de las funciones. */
+	public var returnedValue(default, null):Bool = false;
+
 	/** Errores de este script (si es null se usa defaultErrorHandler). */
 	public var onError:String->Void = null;
 
@@ -74,8 +129,46 @@ class FluxScript
 	/** Se llama cuando el script se cierra solo con close(). */
 	public var onClose:Void->Void = null;
 
+	/** print(...) de este script (si es null se usa defaultPrintHandler). */
+	public var onPrint:String->Void = null;
+
+	/**
+	 * Llama a una función del script desde Haxe (un callback de un timer, un tween...).
+	 * Los errores se avisan con onError (`where` dice dónde) y devuelve null.
+	 */
+	public function callSafe(fn:Dynamic, ?args:Array<Dynamic>, ?where:String = 'callback'):Dynamic
+	{
+		if (!active || fn == null || !Reflect.isFunction(fn))
+			return null;
+		try
+		{
+			return interp != null ? interp.callProtected(fn, args) : Reflect.callMethod(null, fn, args != null ? args : []);
+		}
+		catch (e:Dynamic)
+		{
+			error('Error en $where: ' + errorText(e));
+		}
+		return null;
+	}
+
 	/** Carpeta del mod del script (la pone el engine; la usa getModSetting). */
 	public var modFolder:String = null;
+
+	/**
+	 * Para los scripts globales (los que duran toda la partida): sus task.wait y
+	 * task.delay siguen aunque cambie el estado o se pause el juego, y sus módulos
+	 * de require no se borran al cambiar de estado.
+	 */
+	public var persistent:Bool = false;
+
+	/** Lo que se le aplicó al script (FluxFlixel, FluxPsych...), para hacer lo mismo con los módulos de require. */
+	var presets:Array<{name:String, apply:FluxScript->Void}> = [];
+
+	/** Las tareas que están esperando (se cancelan con destroy). */
+	var tasks:Array<FluxTask> = [];
+
+	/** La tarea que se está ejecutando (task.spawn, task.delay o lo que sigue a un task.wait). */
+	var currentTask:FluxTask = null;
 
 	/** Funciones agregadas con on('evento', función). */
 	var listeners:Map<String, Array<Dynamic>> = new Map<String, Array<Dynamic>>();
@@ -189,6 +282,38 @@ class FluxScript
 
 		// otro FluxScript dentro de este (comparten variables y funciones)
 		set('importCode', function(code:String):Bool return run(code));
+
+		// lo de Lua y Luau: task, require, print, warn, typeof, pcall, math, os...
+		FluxLib.apply(this);
+	}
+
+	/**
+	 * Aplica algo al script una sola vez (FluxFlixel.apply, FluxPsych.apply...) y lo
+	 * anota para hacer lo mismo con los módulos que cargue con require.
+	 * Devuelve false si ya se había aplicado.
+	 */
+	public function usePreset(name:String, apply:FluxScript->Void):Bool
+	{
+		if (hasPreset(name))
+			return false;
+		presets.push({name: name, apply: apply});
+		apply(this);
+		return true;
+	}
+
+	public function hasPreset(name:String):Bool
+	{
+		for (preset in presets)
+			if (preset.name == name)
+				return true;
+		return false;
+	}
+
+	/** Le aplica a otro script lo mismo que se le aplicó a este (para los módulos de require). */
+	public function copyPresetsTo(other:FluxScript):Void
+	{
+		for (preset in presets)
+			other.usePreset(preset.name, preset.apply);
 	}
 
 	/** "beatHit" y "onBeatHit" son el mismo evento. */
@@ -205,16 +330,19 @@ class FluxScript
 	public function execute():Bool
 		return run(code);
 
-	/** Ejecuta más código en el mismo intérprete (las variables y funciones se mantienen). */
-	public function run(source:String):Bool
+	/**
+	 * Ejecuta más código en el mismo intérprete (las variables y funciones se mantienen).
+	 * `origin` es el nombre para los errores (por defecto, el del script).
+	 */
+	public function run(source:String, ?origin:String):Bool
 	{
 		if (!active || source == null)
 			return false;
 		try
 		{
-			// el salto de línea final evita que el parser lea de más si el archivo termina en "#end"
-			var expr:Expr = parser.parseString(FluxSyntax.process(source) + '\n', name);
-			returnValue = interp.execute(expr);
+			var expr:Expr = parse(source, origin);
+			returnedValue = FluxAsync.returnsValue(expr);
+			returnValue = interp.executeNested(expr);
 			return true;
 		}
 		catch (e:Dynamic)
@@ -222,6 +350,17 @@ class FluxScript
 			error('Error al cargar: ' + errorText(e));
 			return false;
 		}
+	}
+
+	/**
+	 * Lee el código (con los textos con variables y los task.wait ya preparados) sin
+	 * ejecutarlo. Si no se puede leer, tira el error.
+	 */
+	public function parse(source:String, ?origin:String):Expr
+	{
+		// el salto de línea final evita que el parser lea de más si el archivo termina en "#end"
+		var expr:Expr = parser.parseString(FluxSyntax.process(source) + '\n', origin != null ? origin : name);
+		return FluxAsync.transform(expr, warn);
 	}
 
 	/** Si existe la función (o hay funciones agregadas con on()). */
@@ -246,6 +385,8 @@ class FluxScript
 		if (args == null)
 			args = [];
 		var result:Dynamic = null;
+		var previousTask:FluxTask = currentTask;
+		currentTask = null; // lo que llama el engine no es parte de una tarea
 		var list:Array<Dynamic> = listeners.get(eventKey(name));
 		if (list != null)
 			for (fn in list.copy())
@@ -255,20 +396,65 @@ class FluxScript
 					result = value;
 			}
 		var fn:Dynamic = functionOf(name);
-		if (fn != null)
+		if (fn != null && active)
 		{
 			var value:Dynamic = callFunction(name, fn, args);
 			if (value != null)
 				result = value;
 		}
+		currentTask = previousTask;
 		return result;
+	}
+
+	/** Ejecuta `fn` como parte de una tarea (task.spawn, task.delay o lo que sigue a un task.wait). */
+	@:allow(fluxscript)
+	function runTask(task:FluxTask, fn:Dynamic, args:Array<Dynamic>, where:String):Dynamic
+	{
+		if (!active || fn == null || !Reflect.isFunction(fn))
+			return null;
+		var previous:FluxTask = currentTask;
+		currentTask = task;
+		var result:Dynamic = null;
+		try
+		{
+			result = interp != null ? interp.callProtected(fn, args) : Reflect.callMethod(null, fn, args != null ? args : []);
+		}
+		catch (e:Dynamic)
+		{
+			error('Error en $where: ' + errorText(e));
+		}
+		currentTask = previous;
+		return result;
+	}
+
+	@:allow(fluxscript)
+	function trackTask(task:FluxTask):Void
+	{
+		if (!tasks.contains(task))
+			tasks.push(task);
+	}
+
+	@:allow(fluxscript)
+	function untrackTask(task:FluxTask):Void
+		tasks.remove(task);
+
+	/** Las tareas que están esperando. */
+	public function pendingTasks():Array<FluxTask>
+		return tasks.copy();
+
+	/** Cancela todas las tareas que están esperando (task.wait, task.delay...). */
+	public function cancelTasks():Void
+	{
+		for (task in tasks.copy())
+			task.cancel();
+		tasks = [];
 	}
 
 	function callFunction(name:String, fn:Dynamic, args:Array<Dynamic>):Dynamic
 	{
 		try
 		{
-			return Reflect.callMethod(null, fn, args);
+			return interp != null ? interp.callProtected(fn, args) : Reflect.callMethod(null, fn, args);
 		}
 		catch (e:Dynamic)
 		{
@@ -293,6 +479,15 @@ class FluxScript
 
 	public function get(name:String):Dynamic
 		return (interp != null && interp.variables.exists(name)) ? interp.variables.get(name) : null;
+
+	/** Si el script tiene esa variable (aunque valga null). */
+	public function has(name:String):Bool
+		return interp != null && interp.variables.exists(name);
+
+	/** set, pero solo si el script todavía no la tiene (así no se pisa lo que puso el engine). */
+	public function setDefault(name:String, value:Dynamic):Void
+		if (!has(name))
+			set(name, value);
 
 	/** El objeto cuyos campos el script usa directo (el estado del juego, o null). */
 	public var parent(get, set):Dynamic;
@@ -320,6 +515,7 @@ class FluxScript
 	public function destroy():Void
 	{
 		active = false;
+		cancelTasks();
 		listeners = new Map<String, Array<Dynamic>>();
 		if (interp != null)
 			interp.parent = null;
@@ -334,6 +530,15 @@ class FluxScript
 			onError(message);
 		else
 			defaultErrorHandler(this, message);
+	}
+
+	/** Lo que hace print(...) en este script. */
+	public function print(text:String):Void
+	{
+		if (onPrint != null)
+			onPrint(text);
+		else
+			defaultPrintHandler(this, text);
 	}
 
 	public function warn(message:String):Void
