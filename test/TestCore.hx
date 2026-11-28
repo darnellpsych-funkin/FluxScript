@@ -1,5 +1,6 @@
 import fluxscript.FluxClasses;
 import fluxscript.FluxScript;
+import fluxscript.FluxTasks;
 
 /** El estado del juego de mentira (sus campos se usan directo). */
 @:keep
@@ -179,6 +180,8 @@ class TestCore
 			var problem:String = FluxScript.checkSyntax(sys.io.File.getContent(file), file);
 			check(problem == null, 'el ejemplo $file se lee bien: $problem');
 		}
+
+		TestLuau.run(check, script, errors, warnings);
 
 		Sys.println('FluxScript (núcleo): $passes OK, $fails fallos');
 		if (fails > 0)
